@@ -1,79 +1,88 @@
-# FilePackerSystem
+# FilePacker v2 (MVP1)
 
-**FilePackerSystem** is a lightweight and efficient library for Unity designed to pack multiple files into binary containers (chunks). It uses a fast Hash-based indexing system to manage access to packed files with built-in compression and encryption support.
+**FilePacker** es una librería de Unity para empaquetar múltiples archivos en contenedores binarios (chunks) con indexado por hash, compresión (LZ4 / Deflate), cifrado con **EasyCrypto** (AES-Unity), verificación de integridad CRC32, listado de contenido, API async y streaming.
 
 [English README](README_EN.md) | [README en Español](README_ES.md)
 
-## Main Features
+## Novedades de la v2 (rompe compatibilidad con el formato v5)
 
-*   **Chunk-based Packing**: Supports large data volumes by splitting content into `.pkcam` files of up to 4GB (configurable).
-*   **Integrated Compression**: Optional Deflate compression to save disk space.
-*   **AES-256 Encryption**: Keep your assets secure with a customizable encryption key.
-*   **Optimized Binary Index**: High-performance `.ipk` file for O(1) lookups (V5).
-*   **Fast Search**: Implements the **FNV-1a 64-bit** algorithm with path normalization and lowercasing.
-*   **Thread-Safe Reading (Basic)**: Allows simultaneous reads from multiple threads.
-*   **Efficient Writing**: Caches streams during massive batch operations.
+- **API fluida**: `FilePack.Create(...).AddFile(...).AddData(...)` con auto-guardado en `Dispose`.
+- **Cifrado serio**: clave maestra protegida con `EasyCrypto` (AES-256-CBC + HMAC-SHA256 + PBKDF2), IV aleatorio por entrada. Nada de claves hardcodeadas.
+- **Integridad**: CRC32 por entrada, verificado en cada lectura.
+- **Listado de contenido**: `ListFiles()` devuelve los nombres de las entradas.
+- **Jerarquía**: `ListFiles("datos")` lista por carpeta y `GetHierarchy()` devuelve el árbol de carpetas/archivos (`PackNode`, con tamaño total por carpeta).
+- **Async**: `ReadFileAsync` / `ReadTextAsync` (Task-based).
+- **Streaming**: `OpenRead()` descifra y descomprime on-the-fly con verificación HMAC incremental.
+- **LZ4**: compresión rápida vía **K4os.Compression.LZ4** (C# puro, MIT) — multiplataforma (Windows/macOS/Linux/Android/iOS/WebGL, Mono e IL2CPP), DLL incluida en `Runtime/Plugins/Lz4/`.
+- **asmdef**: `Miventech.FilePacker.Runtime` + `Miventech.FilePacker.Editor`.
 
-## File Structure
+## Estructura del paquete
 
-1.  **Index File (`.ipk`)**: Stores the allocation table and metadata (Version 5).
-2.  **Data Chunks (`_data_X.pkcam`)**: Binary containers for the packed content.
+1. **Índice (`.ipk`)**: formato binario v6 (magic `MVPI`), tabla de entradas y sobre de clave maestra si hay cifrado.
+2. **Chunks (`_data_X.pkcam`)**: datos hasta 4 GB por chunk (offset global virtual).
+
+## Instalación
+
+1. Copia la carpeta en `Assets/`.
+2. Listo: la librería trae asmdef propio y las DLL managed de LZ4 (K4os + Unsafe) en `Runtime/Plugins/Lz4/`.
+3. El cifrado usa **EasyCrypto** (`Miventech.Security`, librería AES-Unity); asegúrate de que está en el proyecto.
 
 ## Quick Start
 
-### Namespace
 ```csharp
 using Miventech.FilePacker;
-```
 
-### Writing Files (FilePackerWriter)
-
-**Basic Example:**
-
-```csharp
-string indexAPath = Path.Combine(Application.persistentDataPath, "MyPackage.ipk");
-
-using (var writer = new FilePackerWriter(indexAPath))
+// --- Escribir ---
+string indexPath = Path.Combine(Application.persistentDataPath, "game.ipk");
+using (FilePack pack = FilePack.Create(indexPath, new PackOptions
 {
-    // Add file with compression and encryption
-    writer.AddFileToPackage("C:/Assets/texture.png", "image.png", compress: true, encrypt: true);
+    Codec = EntryCodecMode.Lz4,
+    Encrypt = true,
+    Password = "mi-password",
+}))
+{
+    pack.AddFile(rutaEnDisco, "nivel1.json")
+        .AddData(bytesEnMemoria, "texturas/atlas.png");
+} // Dispose → Save() automático
 
-    // Add raw bytes
-    byte[] data = System.Text.Encoding.UTF8.GetBytes("Secret Data");
-    writer.AddFileToPackage(data, "secret.txt", compress: true, encrypt: true);
-    
-    writer.Save();
+// --- Lectura ---
+using (PackReader reader = new PackReader(indexPath, "mi-password"))
+{
+    string[] archivos = reader.ListFiles();
+
+    byte[] data;
+    if (reader.TryReadFile("nivel1.json", out data)) { /* false solo si NO existe */ }
+
+    string json = reader.ReadText("nivel1.json");
+
+    byte[] asyncData = await reader.ReadFileAsync("texturas/atlas.bin");
+
+    Stream stream = reader.OpenRead("video.dat"); // descifrado on-the-fly
+
+    bool ok = reader.VerifyAll(); // CRC32 de todas las entradas
 }
 ```
 
-**Key Methods:**
-*   `AddFileToPackage(..., bool compress = false, bool encrypt = false)`: Main method to add content.
-*   `RemoveExistingChunks()`: Physically deletes data files.
-*   `ClearIndex()`: Resets the entire index.
+## Ventana de editor
 
-### Reading Files (FilePackerReader)
+`Tools → Miventech → File Packer`: empaqueta, lista, lee, verifica y elimina entradas sin escribir código.
 
-The reader handles decompression and decryption automatically based on the index metadata.
+Ejemplo runtime: `SceneTest/FilePackerRuntimeExample.cs` — añádelo a un GameObject y pulsa Play.
 
-**Basic Example:**
+## Detalles técnicos
 
-```csharp
-var reader = new FilePackerReader(indexAPath);
+### Seguridad (sobre EasyCrypto)
+La clave maestra (64 bytes aleatorios: 32 AES + 32 HMAC) se protege con `EasyCrypto.Encrypt(clave, password)` (PBKDF2 con salt aleatorio). El KDF caro corre **una vez por paquete**; cada entrada se cifra con AES-256-CBC + IV aleatorio + HMAC-SHA256 (encrypt-then-MAC). Si la password es incorrecta, falla al abrir el paquete con `FilePackerException`.
 
-if (reader.HasFile("image.png"))
-{
-    byte[] fileData = reader.ReadFile("image.png");
-    // Works the same if the file was compressed or encrypted.
-}
-```
+### Nombres y hash
+Todo nombre se normaliza (minúsculas, `\` → `/`) con FNV-1a 64-bit. El nombre normalizado se guarda en el índice, por eso `ListFiles()` funciona.
 
-## Technical Details
+### Limitaciones
+- **Espacio muerto**: sobrescribir/eliminar entradas no compacta los chunks (repack = crear paquete nuevo).
+- **Streaming**: `OpenRead()` soporta `None` y `Deflate`; LZ4 requiere el bloque completo (`ReadFile`).
+- Formato v6 incompatible con paquetes v5: repaqueta.
 
-### Security
-Change the `EncryptionKey` in `SettingFilePacker.cs` before building your project to ensure asset privacy.
+## Changelog
 
-### Hashing and Paths
-Windows uses `\` but everyone else loves `/`? No problem. The system normalizes all paths to `/` and converts them to lowercase before hashing, so `Folder\File.txt` and `folder/file.txt` point to the same data.
-
-### Limitations
-*   **Garbage Space**: Deleting a file only removes its index entry. The bytes remain in the chunk as "dead space" until a full repack (clear and rebuild) is performed.
+- **v2 (MVP1)** — Reescritura completa: índice v6 (nombres + CRC32), API fluida, async, streaming, sobre EasyCrypto, LZ4, asmdefs.
+- **v1** — Chunks de 4 GB + índice por hash, Deflate, AES-CBC (clave fija, IV estático).
