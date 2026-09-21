@@ -1,0 +1,19 @@
+{
+    "name": "Miventech.FilePacker.Runtime",
+    "rootNamespace": "Miventech.FilePacker",
+    "references": [
+        "Miventech.Security.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "K4os.Compression.LZ4.dll",
+        "System.Runtime.CompilerServices.Unsafe.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
